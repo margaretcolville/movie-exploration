@@ -1,0 +1,164 @@
+---
+title: "Movies' Budgets and Revenues"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(forcats)
+library(ggplot2)
+
+```
+
+```{r parameters, include=FALSE}
+
+min_budget <- 15000
+min_revenue <- 0
+
+budget_colour <- "firebrick"
+revenue_colour <- "royalblue1"
+roi_colour <- "seagreen4"
+
+```
+
+```{r dataextract, include=FALSE}
+
+t <- read_csv('the-movies-dataset/movies_metadata.csv') %>%
+  mutate(year = as.integer(format(release_date,'%Y'))) 
+
+summary <- t %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  select(original_title, budget, revenue, ROI) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  mutate(budget_rank = row_number(budget)) %>% 
+  mutate(revenue_rank = row_number(revenue)) 
+
+genremappings <- read_csv("genremappings.csv")
+
+```
+
+An extract of a little over forty-five thousand films was recently used to analyse the budget and American box office revenues of movies.  The data was sourced from [The Movie Database](https://www.themoviedb.org), a community-built database of movies and TV shows. 
+
+# Films with the highest budget and revenue
+It seems like every week there are breathless announcements in the entertainment news, that the latest blockbuster has broken some kind of record.  Which films had the highest budgets?
+
+```{r high_budget_movies_cash_sbs, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+
+summary %>%
+  top_n(10, budget_rank) %>%
+  mutate(alpha_highlight = ifelse(original_title %in% c('Pirates of the Caribbean: On Stranger Tides','The Lone Ranger'), TRUE, FALSE)) %>%
+  mutate(original_title = fct_reorder(original_title, budget)) %>%
+  gather(key = field, value = value, budget:revenue) %>%
+  mutate(value_mil = value / 10^6) %>%
+  mutate(field = case_when(field=="budget"~"Budget",
+                           field=="revenue"~"Revenue",
+                           TRUE~"Err")) %>%
+  mutate(label = ifelse(original_title %in% c('Pirates of the Caribbean: On Stranger Tides','The Lone Ranger'),paste0(field, ": $", round(value_mil,0), " million"), NA)) %>%
+  mutate(field = factor(field, ordered = TRUE, levels = c("Revenue", "Budget"))) %>%
+  ggplot(aes(x = original_title, y = value_mil, fill = field, alpha = alpha_highlight)) +
+  geom_col(position="dodge") +
+  geom_text(aes(y = value_mil + 100, label = label), 
+            position = position_dodge(width = 1),
+            hjust = 0) +
+  scale_y_continuous(labels = scales::dollar) +
+  scale_alpha_manual(values = c(0.5,1)) +
+  scale_fill_manual(values = c(revenue_colour,budget_colour)) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position = "top") +
+  labs(title = "Pirates: On Stranger Tides cost the most,\nThe Lone Ranger gave the least return",
+       x = "",
+       y = "$ (millions)",
+       fill = "") +
+  guides(fill = guide_legend(reverse = TRUE), alpha = FALSE) +
+  expand_limits(y = c(0, 3000)) +
+  guides(fill=FALSE) +
+  NULL
+
+```
+
+The highest budget film in the dataset is _Pirates of the Caribbean: On Stranger Tides_, which cost \$380 million to make.  It did pay off, though; the film had a revenue of \$1 billion from the box office.  On the other hand,  _The Lone Ranger_ earned a paltry \$89 million revenue from its \$255 million dollar budget.  
+
+Therefore, high budgets don't always translate to large amounts of money coming in.  Which films had the highest revenues?
+
+```{r high_revenue_movies_cash_sbs, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+
+summary %>% 
+  top_n(10, revenue_rank) %>%
+  mutate(alpha_highlight = ifelse(original_title %in% c("Avatar"),TRUE,FALSE)) %>%
+  mutate(original_title = fct_reorder(original_title, revenue)) %>%
+  gather(key = field, value = value, budget:revenue) %>%
+  mutate(value_mil = value / 10 ^ 6) %>%
+  mutate(field = case_when(field=="budget"~"Budget",
+                           field=="revenue"~"Revenue",
+                           TRUE~"Err")) %>%
+  mutate(label = ifelse(original_title %in% c("Avatar"),paste0(field, ": $", round(value_mil,0), " million"), NA)) %>%
+  mutate(field = factor(field, ordered = TRUE, levels = c("Revenue", "Budget"))) %>%
+  ggplot(aes(x = original_title, y = value_mil, fill = field, alpha = alpha_highlight)) +
+  geom_col(position = "dodge") +
+  geom_text(aes(y = 1000, label = label, col = field), 
+            position = position_dodge(width = 1),
+            hjust = 0) +
+  scale_y_continuous(labels = scales::dollar) +
+  scale_alpha_manual(values = c(0.5,1)) +
+  scale_fill_manual(values = c(revenue_colour, budget_colour)) +
+  scale_color_manual(values = c("Budget" = "black", "Revenue" = "white")) +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position = "top") +
+  labs(title = "Avatar had the highest US box office revenue",
+       x = "",
+       y = "$ (millions)",
+       fill = "") +
+  guides(fill = guide_legend(reverse = TRUE), alpha = FALSE) +
+  expand_limits(y = c(0, 3000)) +
+  guides(fill=FALSE, col=FALSE) +
+  NULL
+
+```
+
+The highest revenue film was _Avatar_, which made \$2.8 billion.  Interestingly, there is little-to-no crossover between the two charts; high budgets don't always translate to high revenues.
+
+# Return on Investment (ROI)
+So, if high budgets don't give high revenues, what does?  Here are the films with the highest return on investment (`revenue / budget`) in the dataset.
+
+```{r high_ROIs, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE}
+
+summary %>%
+  top_n(20, ROI) %>%
+  mutate(alpha_highlight = ifelse(original_title %in% c("The Blair Witch Project"), TRUE, FALSE)) %>%
+  mutate(original_title = fct_reorder(original_title, ROI)) %>%
+  mutate(label = ifelse(original_title %in% c("The Blair Witch Project"), paste0("ROI: ", round(ROI,1)),NA)) %>%
+  ggplot(aes(x = original_title, y = ROI, alpha = alpha_highlight)) +
+  geom_col(fill = roi_colour) +
+  geom_text(aes(y = 2000, label = label), col = "white") +
+  coord_flip() +
+  theme_classic() +
+  theme(legend.position = "none") +
+  scale_alpha_manual(values = c(0.5, 1)) +
+  labs(title = "The Blair Witch Project had an extremely high ROI",
+       x = "",
+       y = "ROI") +
+  guides(alpha = FALSE) +
+  NULL
+
+
+```
+
+Obviously, the major outlier here is _The Blair Witch Project_, which made \$250 million off its budget of \$60 thousand.  It's worth noting that a number of other films in this list are also  horror movies; it seems they're cheap to make and sometimes become cult classics.  The film with the Chinese title in second place is [The Way of the Dragon](https://www.imdb.com/title/tt0068935/), a 1972 martial arts flick starring Bruce Lee.
+
+Aside from the horror films already mentioned, there are also a handful of early Disney animated movies on the list; Disney was well known for under-paying its staff in the early days, to the point where [the animators went on strike in 1941](https://en.wikipedia.org/wiki/Disney_animators%27_strike); this may well have contributed to the low budgetary costs of the films in question.
+
+# Conclusion
+In general, the films that make the most revenue are the ones with a significant budget, but generally not the *most* investment.  Yet outliers such as _The Blair Witch Project_ buck the trend and demonstrate that even lower-budget films can be smash hits in the right circumstances, while _The Lone Ranger_ shows that higher-budget films can still flop.
+
+# Further reading
+This was an edited excerpt from a more general exploration of this dataset.  If you wish to read the full analysis, it is available [here](http://rpubs.com/mm-c/movies).
+
+<br>

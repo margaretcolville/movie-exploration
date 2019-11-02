@@ -1,0 +1,685 @@
+---
+title: "Movie exploration"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(tibble)
+library(knitr)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(jsonlite)
+library(stringr)
+library(forcats)
+library(ggplot2)
+library(viridis)
+library(directlabels)
+library(ggrepel)
+
+```
+
+```{r parameters, include=FALSE}
+
+min_budget <- 15000
+min_revenue <- 0
+
+```
+
+```{r functions, include=FALSE}
+
+format_si <- function(...) {
+  # Format a vector of numeric values according
+  # to the International System of Units.
+  # http://en.wikipedia.org/wiki/SI_prefix
+  #
+  # Based on code by Ben Tupper
+  # https://stat.ethz.ch/pipermail/r-help/2012-January/299804.html
+  # Args:
+  #   ...: Args passed to format()
+  #
+  # Returns:
+  #   A function to format a vector of strings using
+  #   SI prefix notation
+  #
+  
+  function(x) {
+    limits <- c(1e-24, 1e-21, 1e-18, 1e-15, 1e-12,
+                1e-9,  1e-6,  1e-3,  1e0,   1e3,
+                1e6,   1e9,   1e12,  1e15,  1e18,
+                1e21,  1e24)
+    prefix <- c("y",   "z",   "a",   "f",   "p",
+                "n",   "µ",   "m",   " ",   "k",
+                "M",   "G",   "T",   "P",   "E",
+                "Z",   "Y")
+    
+    # Vector with array indices according to position in intervals
+    i <- findInterval(abs(x), limits)
+    
+    # Set prefix to " " for very small values < 1e-24
+    i <- ifelse(i==0, which(limits == 1e0), i)
+    
+    paste(format(round(x/limits[i], 1),
+                 trim=TRUE, scientific=FALSE, ...),
+          prefix[i])
+  }
+}
+```
+
+```{r dataextract, include=FALSE}
+
+t <- read_csv('the-movies-dataset/movies_metadata.csv') %>%
+  mutate(year = as.integer(format(release_date,'%Y'))) 
+
+genremappings <- read_csv("genremappings.csv")
+
+```
+
+I have spent the last week or so exploring [this dataset](https://www.kaggle.com/rounakbanik/the-movies-dataset) of movie information, which was extracted from the [The Movie DB](https://www.themoviedb.org).  
+
+# The data tables
+Let's start by taking a look at the structure of the main dataset:
+
+```{r main_table_structure, echo=FALSE}
+glimpse(t)
+```
+
+A thing to note is that a number of the fields in the dataset contain JSON data, to allow the creator to capture multiple values within one CSV field.  (It's actually *malformed* JSON, and that was a headache and a half to deal with; I got the 'genre' one reading successfully, but eventually gave up on parsing any of the others.)  Here's a quick snapshot of the genre data table I extracted:
+
+```{r genre_table_structure, echo=FALSE}
+glimpse(genremappings)
+```
+
+The `id` value is the movie ID from the main table; the same movie ID appears as many times as it had genres.  If it didn't have any genres, it will be missing from the table.
+
+
+# Spread of the data
+The first thing I wanted to investigate was the spread of the data.  
+
+## Years
+Let's start with years.
+
+```{r movies_by_year, echo=FALSE}
+
+t %>%
+  group_by(year) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  filter(!is.na(year)) %>%
+  ggplot(aes(x = year, y = count, group = 1)) +
+  geom_line() +
+  geom_point() +
+  theme_bw() +
+  labs(titles = "Movies in the dataset by year", 
+       x = "Year",
+       y = "Movies in the dataset") +
+  NULL
+```
+
+So, it looks like the data is fairly minimal in the early 1900s, gradually becoming more comprehensive as you get closer to the present day.
+
+Another thing is that the data doesn't just include released movies; there are ones in post production, cancelled, even rumoured.  Let's check the volumes of those.
+
+```{r movies_by_year_by_status, echo=FALSE}
+
+t %>%
+  group_by(status, year) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  filter(!is.na(year)) %>%
+  ggplot(aes(x = year, y = count, group = status, col = status)) +
+  geom_line() +
+  geom_point() +
+  theme_bw() +
+  #scale_y_log10() +
+  labs(title = "Movies in the dataset by year, split by status",
+       x = "Year",
+       y = "Movies in the dataset") +
+  NULL
+
+```
+
+So, it looks like there aren't many movies in any status other than "released" in the dataset, and what *is* there should probably be ignored as the data is likely to be incomplete.
+
+## Languages
+
+TMDB is an English website, so I thought I should check whether the data contained movies from other languages at all, and if so, how many.
+
+```{r movies_by_langauge, echo=FALSE}
+
+t %>%
+  filter(status == "Released") %>%
+  group_by(original_language) %>%
+  summarise(count = n()) %>%
+  top_n(20, count) %>%
+  ungroup() %>%
+  mutate(original_language = fct_reorder(original_language, count)) %>%
+  ggplot( aes(x = original_language, y = count)) +
+  geom_col() +
+  coord_flip() +
+  theme_bw() +
+  #scale_y_log10() +
+  labs(title = "Released movies in the dataset by original language",
+       x = "Original language",
+       y = "Number of movies") +
+  NULL
+
+```
+
+As is to be expected, the dataset is heavily biased towards English releases.  There are a small number of films in other languages, but the primary focus is on movies of interest to English speakers.  This is an important caveat to note on the limitations of the dataset.  
+
+# Remakes and Popular Adaptations
+
+They're kind of the bane of the movie-goer's existence these days; every film in the box office seems to be an adaptation, mostly of the same classic novels that were being made twenty years ago.  Let's take a look at which titles appear most often in the dataset, and how many different languages those films were made in.
+
+```{r remakes_with_langauges, echo=FALSE}
+
+t %>%
+  filter(status == "Released") %>%
+  group_by(original_title) %>%
+  summarise(count = n(),
+            languages = n_distinct(original_language)) %>%
+  ungroup() %>%
+  filter(count > 4) %>%
+  mutate(original_title = fct_reorder(original_title, count)) %>%
+  gather(key = field, value = value, count:languages) %>%
+  ggplot( aes(x = original_title, y = value)) +
+  geom_col(aes(fill=field)) +
+  coord_flip() +
+  theme_bw() +
+  facet_grid(~field) +
+  theme(legend.position = "none") +
+  labs(title = "Movies made again and again",
+       x = "Original Title",
+       y = "") +
+  NULL
+
+```
+
+As is to be expected, the list is basically an English major's assigned reading list: lots of classic English literature, but with an eye to classic children's literature as well, such as _Heidi_.  The handful of exceptions are more generic titles that are presumably co-incidental rather than remakes: "Home", "Blackout", "Eden".  Given the strong English bias in the dataset, it's unsurprising that most of these only appear in one language; but it's also unsurprising that stories like _Les Mis_, originally written in French, have been made in more than one.
+
+
+# Revenue, Budget, and Return on Investment
+
+What types of movies are the biggest successes?  Let's take a look at the ones that make back many times their budget in revenue.  For the purposes of the following charts, Return on Investment (ROI) is calculated as `revenue / budget`; obviously these numbers may not include additional costs such as advertising spend.  The `revenue` field also appears to be the US box office; films that did well internationally may not be represented properly.
+
+First, the movies with the highest budget in the dataset:
+
+```{r high_budget_movies, echo=FALSE}
+
+t %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  select(original_title, budget, revenue, ROI) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  top_n(20, budget) %>%
+  mutate(original_title = fct_reorder(original_title, budget)) %>%
+  gather(key = field, value = value, budget:ROI) %>%
+  ggplot(aes(x = original_title, y = value)) +
+  geom_col(aes(fill = field)) +
+  scale_y_continuous(labels = format_si())+
+  coord_flip() +
+  theme_bw() +
+  facet_grid(~field, scales = "free_x") +
+  theme(legend.position = "none") +
+  labs(title = "Releases with the highest budgets",
+       x = "Original Title",
+       y = "") +
+  NULL
+
+```
+
+As you might expect, this is basically a list of recent blockbusters.  These are the ones that the studios are happy to throw buckets of cash at in the hopes that it pays off.   It mostly does: with the exception of _The Lone Ranger_, all of these films made at least twice their budget in revenue.
+
+Next. let's run the same chart, but sorted by the revenue column:
+
+```{r high_revenue_movies, echo=FALSE}
+
+t %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  select(original_title, budget, revenue, ROI) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  top_n(20, revenue) %>%
+  mutate(original_title = fct_reorder(original_title, revenue)) %>%
+  gather(key = field, value = value, budget:ROI) %>%
+  ggplot(aes(x = original_title, y = value)) +
+  geom_col(aes(fill = field)) +
+  scale_y_continuous(labels = format_si())+
+  coord_flip() +
+  theme_bw() +
+  facet_grid(~field, scales = "free_x") +
+  theme(legend.position = "none") +
+  labs(title = "Releases with the highest revenues",
+       x = "Original Title",
+       y = "") +
+  NULL
+
+```
+
+Still blockbusters, but it's interesting that it is a very different list of blockbusters.  In fact, only a small number of rows in the data are in both the 20 highest budgets and revenues:
+
+```{r budget_vs_revenue_table, echo=FALSE}
+t %>%
+  mutate(budget_rank = min_rank(desc(budget))) %>%
+  mutate(revenue_rank = min_rank(desc(revenue))) %>%
+  top_n(20, revenue) %>%
+  select(original_title, budget, revenue, budget_rank, revenue_rank) %>%
+  select(original_title, budget_rank, revenue_rank) %>%
+  arrange(revenue_rank) %>%
+  kable() %>%
+  kable_styling("striped", full_width = FALSE) %>%
+  row_spec((
+    t %>%
+      select(original_title, budget, revenue) %>% 
+      mutate(budget_rank = min_rank(desc(budget))) %>%
+      mutate(revenue_rank = min_rank(desc(revenue))) %>%
+      top_n(20, revenue) %>%
+      filter(budget_rank <= 20) %>%
+      select(revenue_rank) %>%
+      unlist()
+  ), bold = TRUE)
+```
+
+Finally for this section, we'll run that chart again but sort on the ROI column.
+
+```{r high_ROI_movies, echo=FALSE, message=FALSE}
+t %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  select(original_title, budget, revenue, ROI) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  top_n(20, ROI) %>%
+  mutate(original_title = fct_reorder(original_title, ROI)) %>%
+  gather(key = field, value = value, budget:ROI) %>% 
+  ggplot(aes(x = original_title, y = value)) +
+  geom_col(aes(fill = field)) +
+  coord_flip() +
+  theme_bw() +
+  facet_grid(~field, scales = "free_x") +
+  theme(legend.position = "none") +
+  scale_y_continuous(labels = format_si())+
+  scale_alpha(range = c(0.3, 1)) +
+  labs(title = "Releases with the highest ROIs",
+       x = "Original Title",
+       y = "") +
+  NULL
+
+```
+
+So, _The Blair Witch Project_ is a spectacular outlier, here.  It's also worth noting that a fair number of the other films here (_The Gallows_, _The Texas Chain Saw Massacre_, _Night of the Living Dead_, _Halloween_, _The Legend of Boggy Creek_, and _Blood Feast_) are all horror movies; it seems they're cheap to make and sometimes become cult classics.  
+
+Let's run the chart again, excluding _The Blair Witch Project_ so we can focus on the others.
+
+```{r high_ROI_movies_wo_blair_witch, echo=FALSE}
+
+t %>%
+  filter(status == "Released") %>%
+  filter(!original_title == "The Blair Witch Project") %>%
+  mutate(ROI = revenue / budget) %>%
+  select(original_title, budget, revenue, ROI) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  top_n(19, ROI) %>%
+  mutate(original_title = fct_reorder(original_title, ROI)) %>%
+  gather(key = field, value = value, budget:ROI) %>% 
+  ggplot(aes(x = original_title, y = value)) +
+  geom_col(aes(fill = field)) +
+  coord_flip() +
+  theme_bw() +
+  facet_grid(~field, scales = "free_x") +
+  theme(legend.position = "none") +
+  scale_y_continuous(labels = format_si())+
+  scale_alpha(range = c(0.3, 1)) +
+  labs(title = "Releases with the highest ROIs",
+       subtitle = "Excludes The Blair Witch Project",
+       x = "Original Title",
+       y = "") +
+  NULL
+
+```
+
+The top hit here (the film with the Chinese title) is [The Way of the Dragon](https://www.imdb.com/title/tt0068935/), a 1972 martial arts flick starring Bruce Lee.
+
+Aside from the horror films I already mentioned, there are also a handful of early Disney animated movies on the list; Disney was well known for under-paying its staff in the early days, to the point where [the animators went on strike in 1941](https://en.wikipedia.org/wiki/Disney_animators%27_strike); this may well have contributed to the low budgetary costs of the films in question.
+
+# Genres
+
+Now, let's look at what genres of movies are in the dataset.  
+
+```{r genre_counts, echo=FALSE}
+
+genremappings %>%
+  group_by(genre) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  mutate(genre = fct_reorder(genre, count)) %>%
+  filter(count > 1) %>%
+  ggplot(aes(x = genre, y = count)) +
+  geom_col() +
+  theme_bw() +
+  coord_flip() +
+  labs(title = "Number of movies in each genre in the dataset",
+       subtitle = "Films can have more than one genre",
+       x = "Genre",
+       y = "Count") +
+  NULL
+
+```
+
+Nearly half of the around 45k movies in the dataset are tagged as "Drama".  Let's take a look at some trends over time.  Here's a select group of genres, and the proportion of all films released that decade that were tagged with that genre:
+
+```{r genre_trends_over_time, echo=FALSE, message=FALSE}
+
+genremappings %>%
+  left_join(t) %>%
+  filter(status == "Released") %>%
+  filter(year >= 1930) %>%
+  mutate(decade = paste0(10 * floor(year / 10),"s")) %>%
+  group_by(decade, genre) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  left_join(genremappings %>%
+              group_by(genre) %>%
+              summarise(genrecount = n()) %>%
+              ungroup()) %>%
+  mutate(genre = fct_reorder(genre, -genrecount)) %>%
+  left_join(t %>%
+              mutate(decade = paste0(10 * floor(year / 10),"s")) %>%
+              group_by(decade) %>%
+              summarise(decadecount = n()) %>%
+              ungroup()) %>%
+  mutate(prop = count / decadecount) %>%
+  filter(genre %in% c("Drama", "Comedy", "Thriller", "Documentary", "Action", "Romance", "Horror", "Western")) %>%
+  mutate(western = ifelse(genre == "Western",1,0)) %>%
+  ggplot(aes(x = decade, y = prop, col = genre, group = genre, size = western, alpha = western)) +
+  geom_line() +
+  geom_point() +
+  geom_dl(aes(label = genre), method = list(dl.combine("first.points", "last.points"))) +
+  theme_bw() +
+  scale_alpha(range = c(0.7, 1)) +
+  scale_size(range  = c(1, 2)) +
+  #scale_color_viridis_d() +
+  #facet_grid(genre~.) +
+  guides(alpha = FALSE, col = FALSE, size = FALSE) +
+  expand_limits(x = c("1920s","1930s", "1940s", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s")) +
+  labs(title = "Popularity of genres since 1930",
+       subtitle = "Proportion of all films in that decade which were tagged with that genre. \nOne film might be in multiple genres.") +
+  NULL
+
+```
+
+The chart above lets you spot the downfall of the Western movie - popular up to the 1950s, then a slow decline through to the 1980s when it peters off to essentially nothing.  Yet even at its peak, it didn't hold a candle to the Dramas, Comedies, or Romances.
+
+What about money by genre?  Which types of films make the most money?
+
+```{r money_by_genre, echo=FALSE, message=FALSE}
+genremappings %>%
+  left_join(t) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  filter(status == "Released") %>%
+  left_join(genremappings %>%
+              left_join(t) %>%
+              filter(budget > min_budget) %>%
+              filter(revenue > min_revenue) %>%
+              group_by(genre) %>%
+              summarise(avg = mean(revenue / budget)) %>%
+              ungroup()) %>%
+  mutate(genre = fct_reorder(genre, avg)) %>%
+  select(genre, original_title, avg, budget, revenue) %>%
+  gather(key = field, value = value, budget:revenue) %>%
+  ggplot(aes(x = genre, y = value, col = field)) +
+  geom_boxplot() +
+  coord_flip(ylim = c(0,3*10^9)) +
+  theme_bw() +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Budget and revenue for films in each genre",
+       subtitle = "Films may appear in more than one genre",
+       x = "Genre",
+       y = "") +
+  NULL
+```
+
+You can see there are a small number of outliers here.  Let's find out which films they are.
+
+```{r money_by_genre_labelled, echo=FALSE, message=FALSE, warning=FALSE}
+genremappings %>%
+  left_join(t) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  filter(status == "Released") %>%
+  left_join(genremappings %>%
+              left_join(t) %>%
+              filter(budget > min_budget) %>%
+              filter(revenue > min_revenue) %>%
+              group_by(genre) %>%
+              summarise(avg = mean(revenue / budget)) %>%
+              ungroup()) %>%
+  mutate(genre = fct_reorder(genre, avg)) %>%
+  select(genre, original_title, avg, budget, revenue) %>%
+  gather(key = field, value = value, budget:revenue) %>%
+  mutate(label = ifelse(value > 1.5 * 10 ^ 9, original_title, NA_character_)) %>%
+  ggplot(aes(x = genre, y = value, col = field)) +
+  geom_boxplot() +
+  geom_label_repel(aes(label = label), col = "black") +
+  coord_flip(ylim = c(0,3*10^9)) +
+  theme_bw() +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Budget and revenue for films in each genre",
+       subtitle = "Films may appear in more than one genre",
+       x = "Genre",
+       y = "") +
+  NULL
+```
+
+We're back to the blockbusters, unsurprisingly: _Avatar_, _Star Wars: The Force Awakens_, _Titanic_, _The Avengers_, _Jurassic World_, and _Furious 7_.  Let's run the chart again without the movies that made over $1.5 billion and see what we get.
+
+```{r money_by_genre_limited, echo=FALSE, message=FALSE}
+genremappings %>%
+  left_join(t) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  filter(revenue < 1.5 * 10 ^ 9) %>%
+  filter(status == "Released") %>%
+  left_join(genremappings %>%
+              left_join(t) %>%
+              filter(budget > min_budget) %>%
+              filter(revenue > min_revenue) %>%
+              group_by(genre) %>%
+              summarise(avg = mean(revenue / budget)) %>%
+              ungroup()) %>%
+  mutate(genre = fct_reorder(genre, avg)) %>%
+  select(genre, original_title, avg, budget, revenue) %>%
+  gather(key = field, value = value, budget:revenue) %>%
+  ggplot(aes(x = genre, y = value, col = field)) +
+  geom_boxplot() +
+  coord_flip(ylim = c(0,1.5*10^9)) +
+  theme_bw() +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Budget and revenue for films in each genre < $1.5 billion revenue",
+       subtitle = "Films may appear in more than one genre",
+       x = "Genre",
+       y = "") +
+  NULL
+```
+
+The genres in the chart are ordered by mean ROI.  Therefore, we can see that on average, Horror films get the best value for money from the financers, followed by Documentary and Mystery.  These are all films that can be cheap to produce, though they may have only limited audience appeal judging by the top-value revenues in each.
+
+Let's run a chart showing the ROI values directly:
+
+```{r ROI_by_genre, echo=FALSE, message=FALSE}
+genremappings %>%
+  left_join(t) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  left_join(genremappings %>%
+              left_join(t) %>%
+              filter(budget > min_budget) %>%
+              filter(revenue > min_revenue) %>%
+              group_by(genre) %>%
+              summarise(avg = mean(revenue / budget)) %>%
+              ungroup()) %>%
+  mutate(genre = fct_reorder(genre, avg)) %>%
+  ggplot(aes(x = genre, y = ROI)) +
+  geom_boxplot() +
+  geom_point(aes(y = avg), col = "blue", size = 2) +
+  theme_bw() +
+  coord_flip() +
+  labs(title = "ROI by Genre",
+       subtitle = "The same film may appear in multiple genres; blue dot indicates mean ROI",
+       x = "Genre",
+       y = "ROI") +
+  NULL
+```
+
+Ah, the outliers strike again.  The film making back 4000 times its budget is _The Blair Witch Project_, as we established earlier.  Let's zoom in the chart a bit, focus on movies making fifty times their budget or less.  Which is still a lot of money!  Just not quite as out there.
+
+```{r ROI_by_genre_limited, echo=FALSE, message=FALSE}
+
+genremappings %>%
+  left_join(t) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  left_join(genremappings %>%
+              left_join(t) %>%
+              filter(budget > min_budget) %>%
+              filter(revenue > min_revenue) %>%
+              group_by(genre) %>%
+              summarise(avg = mean(revenue / budget)) %>%
+              ungroup()) %>%
+  mutate(genre = fct_reorder(genre, avg)) %>%
+  ggplot(aes(x = genre, y = ROI)) +
+  geom_boxplot() +
+  geom_point(aes(y = avg), col = "blue", size = 2) +
+  theme_bw() +
+  coord_flip(ylim=c(0,50)) +
+  labs(title = "ROI by Genre, zoomed to <50 ROI",
+       subtitle = "The same film may appear in multiple genres; blue dot indicates mean ROI",
+       x = "Genre",
+       y = "ROI") +
+  NULL
+
+```
+
+Ah, so the zoomed in chart shows that it's at least partially that one movie pulling up the Horror and Mystery genres so high; if you examine the interquartile ranges of the boxplots, you'll spot that Documentary has a higher 75th percentile than either.  It's still pretty good for both overall, but it isn't a guaranteed win or anything.  Not that anything ever is in the movie business anyway.
+
+## Genre combinations
+I have been mentioning repeatedly that the same film could be tagged with multiple genres.  Let's look at the relationship between them.  Which genres appear together most often?
+
+```{r genre_pairing_heatmap, echo=FALSE, message=FALSE}
+
+genremappings %>%
+  rename(genre1 = genre) %>%
+  left_join(
+    genremappings %>%
+      rename(genre2 = genre)
+  ) %>%
+  left_join(
+    genremappings %>%
+      group_by(genre) %>%
+      summarise(genre1total = n()) %>%
+      ungroup(),
+    by = c("genre1" = "genre")
+  ) %>%
+  mutate(genre1 = fct_reorder(genre1, -genre1total)) %>%
+  left_join(
+    genremappings %>%
+      group_by(genre) %>%
+      summarise(genre2total = n()) %>%
+      ungroup(),
+    by = c("genre2" = "genre")
+  ) %>%
+  mutate(genre2 = fct_reorder(genre2, genre2total)) %>%
+  filter(genre1total > genre2total) %>% 
+  group_by(genre1, genre2) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  filter(count > 1) %>%
+  ggplot(aes(x = genre1, y = genre2, label = count)) +
+  geom_tile(aes(fill = count)) +
+  geom_text() +
+  theme_bw() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle=90, vjust = 0.5, hjust=1)) +
+  scale_fill_gradient(low = "purple", high = "orange") +
+  NULL
+
+```
+
+By far the most common combinations in the dataset are Drama/Romance and Drama/Comedy.  The next most frequent are Drama/Thriller and Comedy/Romance, but after that it falls off a cliff fairly rapidly.  These frequencies map fairly closely to the overall proportions, as demonstrated in the next chart.
+
+```{r genre_indiv_pairing_bars, echo=FALSE, message=FALSE}
+
+genremappings %>%
+  rename(genre1 = genre) %>%
+  left_join(
+    genremappings %>%
+      rename(genre2 = genre)
+  ) %>%
+  left_join(
+    genremappings %>%
+      group_by(genre) %>%
+      summarise(genre1total = n()) %>%
+      ungroup(),
+    by = c("genre1" = "genre")
+  ) %>%
+  mutate(genre1 = fct_reorder(genre1, -genre1total)) %>%
+  left_join(
+    genremappings %>%
+      group_by(genre) %>%
+      summarise(genre2total = n()) %>%
+      ungroup(),
+    by = c("genre2" = "genre")
+  ) %>%
+  mutate(genre2 = fct_reorder(genre2, -genre2total)) %>%
+  filter(genre1total >= genre2total) %>%
+  group_by(genre1, genre2) %>%
+  summarise(count = n()) %>%
+  ungroup() %>%
+  filter(count > 1) %>%
+  mutate(group = ifelse(genre1 == genre2,"individual","pairing")) %>%
+  mutate(pairing = ifelse(genre1 == genre2, paste0(genre1), paste(genre1, genre2, sep="-"))) %>%
+  mutate(pairing = fct_reorder(pairing, count)) %>%
+  group_by(group) %>%
+  top_n(20, count) %>%
+  ungroup() %>%
+  ggplot(aes(x = pairing, y = count, fill = group)) +
+  geom_col() +
+  theme_bw() +
+  coord_flip() +
+  facet_wrap(~group, scales = "free_y") +
+  scale_y_continuous(labels=format_si()) +
+  labs(title = "20 most common genres and pairings",
+       x = "",
+       y = "") +
+  guides(fill=FALSE) +
+  NULL
+
+```
+
+# Conclusion
+
+So, after all that, what have we learned?
+
+* A large proportion of English films that are made are Dramas, no matter what year you look at
+* The most common combinations of genres are Drama/Romance and Drama/Comedy
+* The films that get remade most frequently are those based on literature: _Hamlet_ and _Alice in Wonderland_ have both been made into films at least eight times each
+* The most expensive film ever made was _Pirates of the Carribean: On Stranger Tides_
+* _Avatar_ made the most revenue
+* In general, the list of movies with the highest budget was not the same list as the ones with the highest revenue
+* The film with the highest revenue compared to budget was _The Blair Witch Project_, and a number of other Horror films also have high ROI, though _Blair Witch_ was such an outlier it throws the mean out significantly
+* Martial arts and Documentary movies can also be made relatively inexpensively in some cases
+
+<br>

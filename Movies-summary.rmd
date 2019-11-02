@@ -1,0 +1,247 @@
+---
+title: "Movies' Budgets and Revenues"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(forcats)
+library(ggplot2)
+
+```
+
+```{r parameters, include=FALSE}
+
+min_budget <- 15000
+min_revenue <- 0
+
+budget_colour <- "firebrick"
+revenue_colour <- "royalblue1"
+roi_colour <- "mediumorchid3"
+
+```
+
+```{r dataextract, include=FALSE}
+
+t <- read_csv('the-movies-dataset/movies_metadata.csv') %>%
+  mutate(year = as.integer(format(release_date,'%Y'))) 
+
+genremappings <- read_csv("genremappings.csv")
+
+```
+
+An extract of a little over forty-five thousand films was recently used to analyse the budget and revenues of movies.  The data was sourced from [The Movie Database](https://www.themoviedb.org), a community-built database of movies and TV shows. 
+
+# Films with the highest budget and revenue
+It seems like every week there are breathless announcements in the entertainment news, that the latest blockbuster has broken some kind of record.  Which films had the highest budgets?
+
+```{r high_budget_movies_cash_sbs, echo=FALSE}
+
+t %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  select(original_title, budget, revenue, ROI) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  top_n(20, budget) %>%
+  mutate(original_title = fct_reorder(original_title, budget)) %>%
+  gather(key = field, value = value, budget:revenue) %>%
+  mutate(field = factor(field, ordered = TRUE, levels = c("revenue", "budget"))) %>%
+  mutate(value_mil = value / 10^6) %>%
+  ggplot(aes(x = original_title, y = value_mil, fill = field)) +
+  geom_col(position="dodge") +
+  #scale_y_continuous(labels = format_si())+
+  scale_y_continuous(labels = scales::dollar) +
+  scale_fill_manual(values = c(revenue_colour,budget_colour)) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "top") +
+  labs(title = "Releases with the highest budgets",
+       x = "Original Title",
+       y = "$ (millions)",
+       fill = "") +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  expand_limits(y = c(0, 3000)) +
+  NULL
+
+```
+
+The highest budget film in the dataset is _Pirates of the Caribbean: On Stranger Tides_, which cost \$380 million to make.  It did pay off, though; the film had a revenue of \$1 billion from the box office.  On the other hand,  _The Lone Ranger_ earned a paltry \$90 million revenue from its \$255 million dollar budget.  
+
+Therefore, high budgets don't always translate to large amounts of money coming in.  Which films had the highest revenues?
+
+```{r high_revenue_movies_cash_sbs, echo=FALSE}
+
+t %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  select(original_title, budget, revenue, ROI) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  top_n(20, revenue) %>%
+  mutate(original_title = fct_reorder(original_title, revenue)) %>%
+  gather(key = field, value = value, budget:revenue) %>%
+  mutate(field = factor(field, ordered = TRUE, levels = c("revenue", "budget"))) %>%
+  mutate(value_mil = value / 10 ^ 6) %>%
+  ggplot(aes(x = original_title, y = value_mil, fill = field)) +
+  geom_col(position = "dodge") +
+  #scale_y_continuous(labels = format_si())+
+  scale_y_continuous(labels = scales::dollar) +
+  scale_fill_manual(values = c(revenue_colour, budget_colour)) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "top") +
+  labs(title = "Releases with the highest revenues",
+       x = "Original Title",
+       y = "$ (millions)",
+       fill = "") +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  expand_limits(y = c(0, 3000)) +
+  NULL
+
+```
+
+The highest revenue film was _Avatar_, which made \$2.8 billion.  Interestingly, there is very little crossover between the two charts; high budgets don't always translate to high revenues.
+
+# Return on Investment (ROI)
+So, if high budgets don't give high revenues, what does?  Here are the films with the highest return on investment (`revenue / budget`) in the dataset.
+
+```{r high_ROIs, echo=FALSE}
+
+t %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  select(original_title, budget, revenue, ROI) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  top_n(20, ROI) %>%
+  mutate(original_title = fct_reorder(original_title, ROI)) %>%
+  ggplot(aes(x = original_title, y = ROI)) +
+  geom_col(fill = roi_colour) +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "none") +
+  #scale_y_continuous(labels = format_si())+
+  labs(title = "Releases with the highest ROIs",
+       x = "Original Title",
+       y = "ROI") +
+  NULL
+
+
+```
+
+Obviously, the major outlier here is _The Blair Witch Project_, which made \$250 million off its budget of \$60 thousand.  It's worth noting that a number of other films in this list are also  horror movies; it seems they're cheap to make and sometimes become cult classics.  
+
+# Genres
+What film genres have the highest budgets?  Revenues?  Here's a breakdown by genre.
+
+```{r money_by_genre, echo=FALSE}
+genremappings %>%
+  left_join(t, by = c("id" = "id")) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  filter(status == "Released") %>%
+  left_join(genremappings %>%
+              left_join(t, by = c("id" = "id")) %>%
+              filter(budget > min_budget) %>%
+              filter(revenue > min_revenue) %>%
+              group_by(genre) %>%
+              summarise(avg = mean(revenue / budget)) %>%
+              ungroup(), by = c("genre" = "genre")) %>%
+  mutate(genre = fct_reorder(genre, avg)) %>%
+  select(genre, original_title, avg, budget, revenue) %>%
+  gather(key = field, value = value, budget:revenue) %>%
+  mutate(field = factor(field, ordered = TRUE, levels = c("revenue", "budget"))) %>%
+  mutate(value_mil = value / 10 ^ 6) %>%
+  ggplot(aes(x = genre, y = value_mil, col = field)) +
+  geom_boxplot() +
+  coord_flip() +
+  theme_bw() +
+  theme(legend.position = "top") +
+  scale_color_manual(values = c(revenue_colour, budget_colour)) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Budget and revenue for films in each genre",
+       subtitle = "Films may appear in more than one genre",
+       x = "Genre",
+       y = "$ (millions)",
+       col = "") +
+  guides(color = guide_legend(reverse = TRUE)) +
+  expand_limits(y = c(0, 3000)) +
+  NULL
+
+```
+
+This is sorted by average ROI, so the genres where ROI tends to be higher are Horror, Documentary and Mystery.  Plotting ROI directly looks like this:
+
+```{r ROI_by_genre, echo=FALSE}
+genremappings %>%
+  left_join(t, by = c("id" = "id")) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  left_join(genremappings %>%
+              left_join(t, by = c("id" = "id")) %>%
+              filter(budget > min_budget) %>%
+              filter(revenue > min_revenue) %>%
+              group_by(genre) %>%
+              summarise(avg = mean(revenue / budget)) %>%
+              ungroup(), by = c("genre" = "genre")) %>%
+  mutate(genre = fct_reorder(genre, avg)) %>%
+  ggplot(aes(x = genre, y = ROI)) +
+  geom_boxplot(col = roi_colour) +
+  #geom_point(aes(y = avg), col = "blue", size = 2) +
+  theme_bw() +
+  coord_flip() +
+  labs(title = "ROI by Genre",
+       #subtitle = "The same film may appear in multiple genres; blue dot indicates mean ROI",
+       subtitle = "The same film may appear in multiple genres",
+       x = "Genre",
+       y = "ROI") +
+  NULL
+```
+
+That outlier on the Horror and Mystery lines is _The Blair Witch Project_ again.  It's likely its high ROI value is skewing the overall averages for those two genres, which is partially why they are so high.  Here's the same chart, zoomed to <= 50x ROI.
+
+```{r ROI_by_genre_limited, echo=FALSE}
+
+genremappings %>%
+  left_join(t, by = c("id" = "id")) %>%
+  filter(budget > min_budget) %>%
+  filter(revenue > min_revenue) %>%
+  filter(status == "Released") %>%
+  mutate(ROI = revenue / budget) %>%
+  left_join(genremappings %>%
+              left_join(t, by = c("id" = "id")) %>%
+              filter(budget > min_budget) %>%
+              filter(revenue > min_revenue) %>%
+              group_by(genre) %>%
+              summarise(avg = mean(revenue / budget)) %>%
+              ungroup(), by = c("genre" = "genre")) %>%
+  mutate(genre = fct_reorder(genre, avg)) %>%
+  ggplot(aes(x = genre, y = ROI)) +
+  geom_boxplot(col = roi_colour) +
+  geom_point(aes(y = avg), col = "blue", size = 2) +
+  theme_bw() +
+  coord_flip(ylim=c(0,50)) +
+  labs(title = "ROI by Genre, zoomed to <50 ROI",
+       subtitle = "The same film may appear in multiple genres; blue dot indicates mean ROI",
+       x = "Genre",
+       y = "ROI") +
+  NULL
+
+```
+
+The zoomed in chart shows that it's at least partially that one film pulling the Horror and Mystery genres' ROIs up so high; the interquartile ranges of the boxplots demonstrate that Documentary has a higher 75th percentile than either.  ROI is still strong for Horror and Mystery overall, but those genres aren't the guaranteed wins that might be implied by a simple average.
+
+# Conclusion
+In general, the films that make the most revenue are the ones with a significant budget, but generally not the *most* investment.  Yet outliers such as _The Blair Witch Project_ buck the trend and demonstrate that even lower-budget films can be smash hits in the right circumstances, while _The Lone Ranger_ shows that higher-budget films can still flop.
+
+# Further reading
+This was an edited excerpt from a more general exploration of this dataset.  If you wish to read the full analysis, it is available [here](http://rpubs.com/mm-c/movies).
+
+<br>
